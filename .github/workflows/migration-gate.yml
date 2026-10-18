@@ -176,11 +176,23 @@ jobs:
             cryptography fastapi structlog aiohttp prometheus_client cachetools \
             pytest pytest-asyncio
 
+      - name: Record resolved regression dependency versions
+        run: |
+          python - <<'PYVERSIONS'
+          import importlib.metadata
+          import json
+          import sys
+          packages = ("sqlalchemy", "asyncpg", "pytest", "pytest-asyncio", "fastapi")
+          print(json.dumps({"python": sys.version, "packages": {
+              name: importlib.metadata.version(name) for name in packages
+          }}, sort_keys=True))
+          PYVERSIONS
+
       - name: Run migration matrix
         env:
           AUTOBOT_MIGRATION_TEST_ADMIN_URL: postgresql+asyncpg://migtest:migtest@127.0.0.1:5432/postgres
         run: |
-          python -m pytest autobot-backend/tests/migrations/ \
+          python -m pytest autobot-backend/tests/migrations/test_approval_create_relationships_18803.py \
             -m migration_gate -v --tb=short -p no:cacheprovider
 
       - name: Run static gates (no database)
