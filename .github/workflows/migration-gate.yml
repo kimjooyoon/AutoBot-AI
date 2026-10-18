@@ -16,65 +16,6 @@
 name: Migration Gate
 
 on:
-  # #14054: the merge queue builds each entrant against base + the entries
-  # ahead of it and expects the required contexts to report against that
-  # temporary ref. A required context with no `merge_group:` trigger never
-  # fires, and the queue waits on it forever. Inert until the `merge_queue`
-  # ruleset rule is enabled -- this event does not exist before then.
-  merge_group:
-  push:
-    branches: [ release, main ]
-    paths:
-      - 'autobot-backend/migrations/**'
-      - 'autobot-backend/tests/migrations/**'
-      - 'autobot-backend/user_management/models/**'
-      - 'autobot-backend/llc/models/**'
-      - 'autobot-backend/canvas/models.py'
-      - 'autobot-backend/models/**'
-      - 'autobot-backend/initialization/lifespan.py'
-      - 'autobot-slm-backend/ansible/setup-user-backend.yml'
-      - 'autobot-slm-backend/ansible/playbooks/update-all-nodes.yml'
-      - '.github/workflows/migration-gate.yml'
-      - 'autobot-backend/services/*secret*.py'
-      - 'autobot-backend/services/credential_*.py'
-      - 'autobot-backend/services/orphan_repair*.py'
-      - 'autobot-backend/services/provider_key_vault.py'
-      - 'autobot-backend/services/__init__.py'
-      - 'autobot-backend/services/approval_gate_service.py'
-      - 'autobot-backend/api/**'
-      - 'autobot_shared/secrets_envelope.py'
-      - 'autobot_shared/status_enums.py'
-      - 'autobot_shared/time_utils.py'
-      - 'autobot_shared/auth/device_capabilities.py'
-      - 'autobot_shared/secrets_vault.py'
-      - 'autobot_shared/legacy_secret_keys.py'
-      - '.github/workflows/_changes.yml'
-  # NOTE (#11346): no pull_request.paths filter — this workflow ALWAYS runs on PRs
-  # so its required-check context ("migration-matrix") always reports a conclusion.
-  # A path-filtered required check that never triggers leaves the PR deadlocked on
-  # "Expected — Waiting for status". The real matrix is gated on the `changes` job
-  # below; #13862 made the required context a separate reporting job so that
-  # "nothing to verify" is stated rather than inferred from a skip.
-  pull_request:
-    # ready_for_review is REQUIRED here: the jobs below are gated on
-    # draft == false, and marking a PR ready fires ONLY this event. Without
-    # it a required context stays `skipped` and the PR can never merge.
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [ release, main ]
-  # #17490: every trigger above is path-driven, so a break whose cause is not a
-  # commit is invisible to all of them. That is not hypothetical -- #17490 was
-  # exactly this: SQLAlchemy 2.1.0 was published, `migration-gate.yml` installed
-  # an unpinned `sqlalchemy>=2.0`, and the chain started failing on a
-  # `type "approvaltype" does not exist` that no diff in this repository caused.
-  # It then surfaced on #17439, a Redis PR touching no migration files, whose
-  # author could reasonably have read it as theirs.
-  #
-  # A daily run makes the matrix answer "does the chain still build today", not
-  # only "did this diff break it". Offset from the 02:00 cluster (coverage,
-  # branch-cleanup) so a Postgres service container is not competing with them.
-  schedule:
-    - cron: '40 4 * * *'
-  # Manual re-run, for confirming a fix without pushing a path-touching commit.
   workflow_dispatch:
 
 concurrency:
