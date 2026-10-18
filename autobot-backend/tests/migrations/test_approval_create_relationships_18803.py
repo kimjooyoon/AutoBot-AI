@@ -5,7 +5,10 @@
 No fake session or SQLite backend.
 """
 
+import importlib
+import sys
 import uuid
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -15,14 +18,47 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-import api.approval_gates as route
 from api.user_management.dependencies import get_db_session
 from auth_middleware import get_current_user
 from models.approval import Approval, TaskApprovalLink
 from services.approval_gate_service import ApprovalGateService
+from testkit.module_stubs import StubSet
 from tests.migrations.conftest import requires_postgres, run_alembic
 
 pytestmark = [pytest.mark.migration_gate, requires_postgres]
+
+
+@pytest.fixture
+def approval_route():
+    """Bypass only an unused knowledge package initializer; keep its real stamp leaf.
+
+    The existing StubSet owns new child-module keys and restores parent bindings
+    in finally. No package stub remains between collection of unrelated tests.
+    An already imported real knowledge package is never replaced.
+    """
+    backend = Path(__file__).resolve().parents[2]
+    stubs = StubSet()
+    try:
+        knowledge = sys.modules.get("services.knowledge")
+        if not isinstance(getattr(knowledge, "__file__", None), str):
+            stubs.install_package("services.knowledge", backend / "services" / "knowledge")
+            stubs.import_real("services.knowledge.collection_space_stamp_action")
+        route = importlib.import_module("api.approval_gates")
+        assert route.ApprovalGateService is ApprovalGateService
+        assert route.get_db_session is get_db_session
+        assert route.get_current_user is get_current_user
+        assert route._to_response.__module__ == "api.approval_gates"
+        assert Path(route._to_response.__code__.co_filename).resolve() == backend / "api" / "approval_gates.py"
+        assert ApprovalGateService.create_approval.__module__ == "services.approval_gate_service"
+        assert Path(ApprovalGateService.create_approval.__code__.co_filename).resolve() == (
+            backend / "services" / "approval_gate_service.py"
+        )
+        assert Path(route.register_stamp_action.__code__.co_filename).resolve() == (
+            backend / "services" / "knowledge" / "collection_space_stamp_action.py"
+        )
+        yield route
+    finally:
+        stubs.restore()
 
 
 @pytest.fixture
@@ -30,6 +66,7 @@ async def approval_sessions(fresh_db_url, monkeypatch):
     """Reuse the disposable-Postgres migration gate, without external notifications."""
     assert fresh_db_url.startswith("postgresql+asyncpg://")
     assert sqlalchemy.inspect(Approval).class_ is Approval, "real mapped Approval required"
+    assert sqlalchemy.inspect(TaskApprovalLink).class_ is TaskApprovalLink, "real mapped task links required"
     migrated = run_alembic(["upgrade", "head"], fresh_db_url)
     assert migrated.returncode == 0, "disposable database migration failed"
     monkeypatch.setattr(ApprovalGateService, "_notify", AsyncMock())
@@ -41,10 +78,10 @@ async def approval_sessions(fresh_db_url, monkeypatch):
         await engine.dispose()
 
 
-async def _post_create(sessions, body):
+async def _post_create(sessions, body, approval_route):
     """Use the real router/service/session; only the authenticated test identity is supplied."""
     app = FastAPI()
-    app.include_router(route.router)
+    app.include_router(approval_route.router)
 
     async def db_session():
         async with sessions() as session:
@@ -62,10 +99,10 @@ async def _post_create(sessions, body):
 
 
 @pytest.fixture
-def response_failures(monkeypatch):
+def response_failures(monkeypatch, approval_route):
     """Record the real serializer's exception class without replacing its behavior."""
     failures = []
-    original = route._to_response
+    original = approval_route._to_response
 
     def observed(row):
         try:
@@ -74,15 +111,18 @@ def response_failures(monkeypatch):
             failures.append(type(error).__module__ + "." + type(error).__name__)
             raise
 
-    monkeypatch.setattr(route, "_to_response", observed)
+    monkeypatch.setattr(approval_route, "_to_response", observed)
     return failures
 
 
-async def test_http_create_returns_201_and_commits_empty_relationships(approval_sessions, response_failures):
+async def test_http_create_returns_201_and_commits_empty_relationships(
+    approval_sessions, response_failures, approval_route
+):
     title = "synthetic ordinary gate"
     response = await _post_create(
         approval_sessions,
         {"title": title, "approval_type": "workflow_gate", "context": {"synthetic": True}},
+        approval_route,
     )
     async with approval_sessions() as reader:
         stored = (
@@ -108,12 +148,13 @@ async def test_http_create_returns_201_and_commits_empty_relationships(approval_
     assert response_failures == []
 
 
-async def test_http_create_returns_real_committed_task_links(approval_sessions, response_failures):
+async def test_http_create_returns_real_committed_task_links(approval_sessions, response_failures, approval_route):
     title = "synthetic linked gate"
     task_ids = ["synthetic:relationship-regression:one", "synthetic:relationship-regression:two"]
     response = await _post_create(
         approval_sessions,
         {"title": title, "approval_type": "workflow_gate", "task_ids": task_ids},
+        approval_route,
     )
     async with approval_sessions() as reader:
         stored_ids = (await reader.execute(select(Approval.id).where(Approval.title == title))).scalars().all()
@@ -143,7 +184,7 @@ async def test_http_create_returns_real_committed_task_links(approval_sessions, 
     assert response_failures == []
 
 
-async def test_company_create_is_loaded_detached_and_still_excluded_from_general_api(approval_sessions):
+async def test_company_create_is_loaded_detached_and_still_excluded_from_general_api(approval_sessions, approval_route):
     company_id = uuid.uuid4()
     task_id = "synthetic:relationship-regression:company"
     async with approval_sessions() as creator:
@@ -154,7 +195,7 @@ async def test_company_create_is_loaded_detached_and_still_excluded_from_general
         assert {"comments", "task_links"}.isdisjoint(sqlalchemy.inspect(row).unloaded)
         creator.expunge(row)
         assert sqlalchemy.inspect(row).session is None
-        response = route._to_response(row)
+        response = approval_route._to_response(row)
         assert response.comments == []
         assert len(response.task_links) == 1
         assert response.task_links[0].task_id == task_id
